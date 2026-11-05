@@ -1,0 +1,50 @@
+name: Extract Bot ZIP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Extract ZIP
+        run: |
+          ZIP_NAME="Cloud-main.zip"
+
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "ZIP file not found!"
+            exit 1
+          fi
+
+          mkdir -p _extract
+          unzip -o "$ZIP_NAME" -d _extract
+
+          if [ -d "_extract/Cloud-main" ]; then
+            cp -a _extract/Cloud-main/. .
+          else
+            cp -a _extract/. .
+          fi
+
+          rm -rf _extract
+          rm -f "$ZIP_NAME"
+
+      - name: Commit extracted files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Extract bot ZIP" || exit 0
+          git push
