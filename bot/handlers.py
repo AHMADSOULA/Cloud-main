@@ -98,7 +98,7 @@ def build_darktunnel_uri_with_host(base_uri: str, new_host: str) -> str:
 
 
 # ═══════════════════════════════════════════
-# مُرسل الصور (مثل take_screenshot في GC.py)
+# مُرسل الصور
 # ═══════════════════════════════════════════
 def make_sender(chat_id, context):
     async def sender(img_bytes: bytes, label: str = ""):
@@ -113,6 +113,37 @@ def make_sender(chat_id, context):
         except Exception as e:
             log.debug(f"send_photo: {e}")
     return sender
+
+
+# ═══════════════════════════════════════════
+# طلب كلمة السر
+# ═══════════════════════════════════════════
+async def request_password(context, chat_id, user_id):
+    """يرسل طلب كلمة السر وينتظر رسالة المستخدم (حتى 3 دقائق)."""
+    fut = asyncio.get_event_loop().create_future()
+    waiters = context.bot_data.setdefault("pwd_waiters", {})
+    waiters[user_id] = fut
+    try:
+        await context.bot.send_message(
+            chat_id,
+            "🔐 يبدو أن الحساب يحتاج كلمة سر Google.\n"
+            "أرسل كلمة السر الآن في رسالة نصية (ستُحذف تلقائياً بعد الاستلام).",
+        )
+    except Exception as e:
+        log.warning(f"send pwd prompt: {e}")
+
+    try:
+        return await asyncio.wait_for(fut, timeout=180)
+    except asyncio.TimeoutError:
+        try:
+            await context.bot.send_message(
+                chat_id, "⌛ انتهى وقت انتظار كلمة السر. أعد إرسال رابط SSO."
+            )
+        except Exception:
+            pass
+        return None
+    finally:
+        waiters.pop(user_id, None)
 
 
 # ═══════════════════════════════════════════
@@ -155,20 +186,49 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await b.close()
         except Exception:
             pass
+
+    # إلغاء أي انتظار كلمة سر معلّق
+    waiters = context.bot_data.get("pwd_waiters", {})
+    fut = waiters.pop(user.id, None)
+    if fut and not fut.done():
+        fut.set_result(None)
+
     await update.message.reply_text("🚫 تم الإلغاء.")
 
 
 # ═══════════════════════════════════════════
-# استقبال SSO
+# استقبال SSO + كلمة السر
 # ═══════════════════════════════════════════
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     text = update.message.text or ""
+
+    # 1) هل يوجد طلب كلمة سر معلّق لهذا المستخدم؟
+    waiters = context.bot_data.get("pwd_waiters", {})
+    fut = waiters.get(user.id)
+    if fut and not fut.done():
+        # حماية: إذا أرسل المستخدم رابطاً بدل كلمة السر
+        if extract_urls(text):
+            await update.message.reply_text(
+                "⚠️ البوت ينتظر كلمة السر الآن. أرسل كلمة السر، أو /cancel للإلغاء."
+            )
+            return
+
+        pw = text.strip()
+        fut.set_result(pw)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        await update.message.reply_text("✅ تم استلام كلمة السر، جاري المتابعة…")
+        return
+
+    # 2) رسالة عادية — استقبل رابط SSO
     urls = extract_urls(text)
     if not urls:
         await update.message.reply_text(messages.NO_URL)
         return
     sso_url = urls[0]
-    user = update.effective_user
 
     if "skills.google" not in sso_url and "qwiklabs" not in sso_url:
         await update.message.reply_text("⚠️ الرابط لا يبدو من Google Skills.")
@@ -187,7 +247,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════
-# معالجة المهمة — متوازية + تصوير مستمر
+# معالجة المهمة
 # ═══════════════════════════════════════════
 async def process_queue(chat_id, user_id, context):
     item = await queue.get_next()
@@ -197,7 +257,7 @@ async def process_queue(chat_id, user_id, context):
     job = item
     sender = make_sender(chat_id, context)
 
-    async with _sem:  # ✅ 2 مهام متزامنة
+    async with _sem:
         browser = None
         try:
             browser = StealthBrowser()
@@ -207,8 +267,11 @@ async def process_queue(chat_id, user_id, context):
                 ctx,
                 job["sso_url"],
                 image=config.DEFAULT_IMAGE,
-                sender=sender,            # ✅ يمرّر للـ CloudConsole
+                sender=sender,
                 user_tag=job["user_tag"],
+                password_requester=lambda cid, uid: request_password(context, cid, uid),
+                chat_id=chat_id,
+                user_id=user_id,
             )
 
             domain = result["domain"]
@@ -259,7 +322,6 @@ async def process_queue(chat_id, user_id, context):
                     await browser.close()
                 except Exception:
                     pass
-            # 🚀 شغّل التالي مباشرةً
             if queue.queue_size() > 0:
                 asyncio.create_task(process_queue(chat_id, user_id, context))
 
