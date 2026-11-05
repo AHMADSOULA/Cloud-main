@@ -1,6 +1,6 @@
 """
 automation/sso_flow.py
-تنسيق العملية — سريع + تصوير كل مرحلة + صفحة واحدة لإعادة الاستخدام
+تنسيق العملية — سريع + تصوير كل مرحلة + صفحة واحدة
 """
 import re
 from urllib.parse import urlparse, parse_qs
@@ -40,7 +40,7 @@ async def run_sso_flow(context, sso_url: str, image: str, sender=None, user_tag=
 
     console = CloudConsole(context, sender=sender, user_tag=user_tag)
 
-    # صفحة واحدة مشتركة بين كل المراحل — أسرع + تحافظ على الجلسة
+    # صفحة واحدة مشتركة بين كل المراحل — مثل GC.py
     page = await context.new_page()
     final_url = None
     authuser = "1"
@@ -61,9 +61,12 @@ async def run_sso_flow(context, sso_url: str, image: str, sender=None, user_tag=
 
         # انتظار ذكي قصير للـ dashboard بدل 60s + 2s
         try:
-            await page.wait_for_url("**/home/dashboard**", timeout=15000)
+            await page.wait_for_url("**/home/dashboard**", timeout=20000)
         except Exception:
             pass
+        
+        # انتظار إضافي بسيط لاستقرار الجلسة (مثل GC.py)
+        await page.wait_for_timeout(2000)
 
         authuser = extract_authuser(page.url)
         log.info(f"🔑 authuser = {authuser}")
@@ -85,7 +88,7 @@ async def run_sso_flow(context, sso_url: str, image: str, sender=None, user_tag=
         await console._shot(page, "🎉 الخدمة جاهزة")
 
     except Exception as e:
-        # صورة عند الفشل (بأفضل مجهود)
+        # صورة عند الفشل (بأفضل مجهود) — مثل دالة handle_error في GC.py
         try:
             await console._shot(page, f"❌ فشل: {str(e)[:60]}")
         except Exception:
