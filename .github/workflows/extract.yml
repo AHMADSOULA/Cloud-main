@@ -1,0 +1,37 @@
+name: Extract ZIP
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Extract bot files
+        run: |
+          if [ -f "Cloud-main-deploy-package.zip" ]; then
+            mkdir -p _package
+            unzip -o Cloud-main-deploy-package.zip -d _package
+            unzip -o _package/Cloud-main.zip -d .
+            rm -rf _package
+          else
+            echo "ZIP file not found"
+            exit 1
+          fi
+
+      - name: Save extracted files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Extract bot ZIP" || echo "No changes"
+          git push
