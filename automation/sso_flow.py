@@ -1,6 +1,7 @@
 """
 automation/sso_flow.py
-تنسيق العملية — يدعم تسجيل دخول Google التلقائي (Next + سؤال كلمة السر)
+تنسيق العملية — يدعم تسجيل دخول Google التلقائي (إيميل → تالي → كلمة سر)
++ TOS + Terms Dialog، ثم Enable API → Cloud Run → استخراج URL
 """
 import re
 from urllib.parse import urlparse, parse_qs
@@ -33,9 +34,9 @@ def extract_authuser(page_url: str) -> str:
 
 async def _reach_dashboard(console, page, max_attempts=8):
     """
-    حلقة ذكية: تتعامل مع أي مزيج من:
-      - صفحة تسجيل دخول (إيميل → تالي → كلمة سر)
-      - TOS
+    حلقة ذكية تتعامل مع أي مزيج من:
+      - صفحة تسجيل دخول Google (إيميل → تالي → كلمة سر)
+      - صفحة TOS
       - Terms Dialog
     حتى الوصول إلى /home/dashboard.
     """
@@ -62,13 +63,12 @@ async def _reach_dashboard(console, page, max_attempts=8):
         except Exception as e:
             log.debug(f"step1: {e}")
 
-        # 3) Terms dialog
+        # 3) Terms Dialog
         try:
             await console.step2_terms_dialog(page)
         except Exception as e:
             log.debug(f"step2: {e}")
 
-        # 4) انتظار قصير لتحديث الحالة
         await page.wait_for_timeout(2000)
 
     try:
