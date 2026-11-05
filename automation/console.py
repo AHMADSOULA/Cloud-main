@@ -46,28 +46,51 @@ class CloudConsole:
         await self._shot(page, "1️⃣ TOS انتهت")
 
     # ═══════════════════════════════════════
-    # STEP 2: TOS + Country — نفس GC.py
+    # STEP 2: TOS + Country — معدلة لتجنب الأخطاء
     # ═══════════════════════════════════════
     async def step2_tos_and_country(self, page):
         log.info("🚀 step2: TOS + Country")
         await self._shot(page, "2️⃣ قبل TOS Country")
+
+        # محاولة إغلاق أي نوافذ منبثقة تعيق العمل (مثل Configure Gemini)
+        try:
+            close_btn = page.locator('button[aria-label="Close"]').first
+            if await close_btn.is_visible(timeout=1000):
+                await close_btn.click()
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
 
         agree_btn = page.get_by_role("button", name="Agree and continue")
 
         try:
             await agree_btn.wait_for(state="visible", timeout=10000)
 
+            # البحث عن جميع مربعات الاختيار والضغط عليها (بدل الاعتماد على nth(0) و nth(1))
             checkboxes = page.get_by_role("checkbox")
-            await checkboxes.nth(0).click()
-            await asyncio.sleep(1)
-            await checkboxes.nth(1).click()
+            count = await checkboxes.count()
+            log.info(f"تم إيجاد {count} مربع اختيار")
+            
+            for i in range(count):
+                try:
+                    if not await checkboxes.nth(i).is_checked():
+                        await checkboxes.nth(i).click()
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    log.debug(f"خطأ في مربع الاختيار {i}: {e}")
 
+            # انتظار تفعيل الزر قبل الضغط
+            try:
+                await expect(agree_btn).to_be_enabled(timeout=5000)
+            except Exception:
+                pass
+            
             await agree_btn.click()
             await page.wait_for_load_state("domcontentloaded")
             log.info("✅ TOS Country تمت")
 
-        except Exception:
-            log.info("ℹ️ رسالة الشروط لم تظهر، تم التخطي.")
+        except Exception as e:
+            log.warning(f"TOS Country: {e}")
 
         await self._shot(page, "2️⃣ TOS Country انتهت")
 
