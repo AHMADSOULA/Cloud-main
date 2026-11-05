@@ -18,7 +18,7 @@ from automation.sso_flow import run_sso_flow
 log = get_logger("Handlers")
 
 # ═══════════════════════════════════════════
-# طابور متوازٍ (2 في نفس الوقت)
+# طابور
 # ═══════════════════════════════════════════
 MAX_CONCURRENT_JOBS = 2
 _sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
@@ -116,37 +116,6 @@ def make_sender(chat_id, context):
 
 
 # ═══════════════════════════════════════════
-# طلب كلمة السر
-# ═══════════════════════════════════════════
-async def request_password(context, chat_id, user_id):
-    """يرسل طلب كلمة السر وينتظر رسالة المستخدم (حتى 3 دقائق)."""
-    fut = asyncio.get_event_loop().create_future()
-    waiters = context.bot_data.setdefault("pwd_waiters", {})
-    waiters[user_id] = fut
-    try:
-        await context.bot.send_message(
-            chat_id,
-            "🔐 يبدو أن الحساب يحتاج كلمة سر Google.\n"
-            "أرسل كلمة السر الآن في رسالة نصية (ستُحذف تلقائياً بعد الاستلام).",
-        )
-    except Exception as e:
-        log.warning(f"send pwd prompt: {e}")
-
-    try:
-        return await asyncio.wait_for(fut, timeout=180)
-    except asyncio.TimeoutError:
-        try:
-            await context.bot.send_message(
-                chat_id, "⌛ انتهى وقت انتظار كلمة السر. أعد إرسال رابط SSO."
-            )
-        except Exception:
-            pass
-        return None
-    finally:
-        waiters.pop(user_id, None)
-
-
-# ═══════════════════════════════════════════
 # الأوامر
 # ═══════════════════════════════════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,49 +155,20 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await b.close()
         except Exception:
             pass
-
-    # إلغاء أي انتظار كلمة سر معلّق
-    waiters = context.bot_data.get("pwd_waiters", {})
-    fut = waiters.pop(user.id, None)
-    if fut and not fut.done():
-        fut.set_result(None)
-
     await update.message.reply_text("🚫 تم الإلغاء.")
 
 
 # ═══════════════════════════════════════════
-# استقبال SSO + كلمة السر
+# استقبال SSO
 # ═══════════════════════════════════════════
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     text = update.message.text or ""
-
-    # 1) هل يوجد طلب كلمة سر معلّق لهذا المستخدم؟
-    waiters = context.bot_data.get("pwd_waiters", {})
-    fut = waiters.get(user.id)
-    if fut and not fut.done():
-        # حماية: إذا أرسل المستخدم رابطاً بدل كلمة السر
-        if extract_urls(text):
-            await update.message.reply_text(
-                "⚠️ البوت ينتظر كلمة السر الآن. أرسل كلمة السر، أو /cancel للإلغاء."
-            )
-            return
-
-        pw = text.strip()
-        fut.set_result(pw)
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-        await update.message.reply_text("✅ تم استلام كلمة السر، جاري المتابعة…")
-        return
-
-    # 2) رسالة عادية — استقبل رابط SSO
     urls = extract_urls(text)
     if not urls:
         await update.message.reply_text(messages.NO_URL)
         return
     sso_url = urls[0]
+    user = update.effective_user
 
     if "skills.google" not in sso_url and "qwiklabs" not in sso_url:
         await update.message.reply_text("⚠️ الرابط لا يبدو من Google Skills.")
@@ -247,7 +187,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════
-# معالجة المهمة
+# معالجة المهمة — نفس GC.py + 3 ملفات DarkTunnel
 # ═══════════════════════════════════════════
 async def process_queue(chat_id, user_id, context):
     item = await queue.get_next()
@@ -269,14 +209,12 @@ async def process_queue(chat_id, user_id, context):
                 image=config.DEFAULT_IMAGE,
                 sender=sender,
                 user_tag=job["user_tag"],
-                password_requester=lambda cid, uid: request_password(context, cid, uid),
-                chat_id=chat_id,
-                user_id=user_id,
             )
 
             domain = result["domain"]
             final_url = result["final_url"]
 
+            # 1) رسالة النجاح
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
@@ -287,12 +225,21 @@ async def process_queue(chat_id, user_id, context):
                 parse_mode=ParseMode.MARKDOWN,
             )
 
+            # 2) إرسال 3 ملفات DarkTunnel معدّلة (بعد نجاح الخدمة)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="📦 جاري إرسال 3 ملفات DarkTunnel…"
+            )
+
             for dark in DARK_FILES:
                 try:
                     new_uri = build_darktunnel_uri_with_host(dark["uri"], domain)
+
                     safe_domain = "".join(
-                        c for c in domain.lower() if c.isalnum() or c in ".-_"
+                        c for c in domain.lower()
+                        if c.isalnum() or c in ".-_"
                     )[:40]
+
                     filename = f"{dark['name']} - {safe_domain}.dark"
 
                     bio = io.BytesIO(new_uri.encode("utf-8"))
@@ -304,6 +251,8 @@ async def process_queue(chat_id, user_id, context):
                         filename=filename,
                         caption=f"✅ {dark['name']}\n`{domain}`",
                     )
+                    await asyncio.sleep(0.4)  # تجنب flood
+
                 except Exception as e:
                     log.warning(f"⚠️ dark {dark['name']}: {e}")
 
@@ -322,6 +271,7 @@ async def process_queue(chat_id, user_id, context):
                     await browser.close()
                 except Exception:
                     pass
+
             if queue.queue_size() > 0:
                 asyncio.create_task(process_queue(chat_id, user_id, context))
 
