@@ -20,7 +20,6 @@ log = get_logger("Handlers")
 # ═══════════════════════════════════════════
 # طابور متوازٍ (2 في نفس الوقت)
 # ═══════════════════════════════════════════
-
 MAX_CONCURRENT_JOBS = 2
 _sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
@@ -60,7 +59,6 @@ queue = JobQueue()
 # ═══════════════════════════════════════════
 # 3 ملفات DarkTunnel
 # ═══════════════════════════════════════════
-
 DARK_FILES = [
     {
         "name": "YOUTUBE_4H_🇺🇸",
@@ -100,9 +98,8 @@ def build_darktunnel_uri_with_host(base_uri: str, new_host: str) -> str:
 
 
 # ═══════════════════════════════════════════
-# مُرسل الصور
+# مُرسل الصور (مثل take_screenshot في GC.py)
 # ═══════════════════════════════════════════
-
 def make_sender(chat_id, context):
     async def sender(img_bytes: bytes, label: str = ""):
         try:
@@ -121,7 +118,6 @@ def make_sender(chat_id, context):
 # ═══════════════════════════════════════════
 # الأوامر
 # ═══════════════════════════════════════════
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db.register_user(user.id, user.username or user.first_name)
@@ -165,7 +161,6 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════
 # استقبال SSO
 # ═══════════════════════════════════════════
-
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     urls = extract_urls(text)
@@ -194,7 +189,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════
 # معالجة المهمة — متوازية + تصوير مستمر
 # ═══════════════════════════════════════════
-
 async def process_queue(chat_id, user_id, context):
     item = await queue.get_next()
     if not item:
@@ -265,13 +259,12 @@ async def process_queue(chat_id, user_id, context):
                     await browser.close()
                 except Exception:
                     pass
-            # 🚀 شغّل التالي مباشرةً (بدون انتظار انتهاء sem)
+            # 🚀 شغّل التالي مباشرةً
             if queue.queue_size() > 0:
                 asyncio.create_task(process_queue(chat_id, user_id, context))
 
 
 # ═══════════════════════════════════════════
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
