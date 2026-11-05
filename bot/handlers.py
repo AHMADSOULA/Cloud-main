@@ -18,14 +18,17 @@ from automation.sso_flow import run_sso_flow
 log = get_logger("Handlers")
 
 # ═══════════════════════════════════════════
-# طابور
+# طابور متوازٍ (2 في نفس الوقت)
 # ═══════════════════════════════════════════
+
+MAX_CONCURRENT_JOBS = 2
+_sem = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
 
 class JobQueue:
     def __init__(self):
         self.queue = []
         self.counter = 0
-        self.current = None
         self.lock = asyncio.Lock()
 
     async def add(self, user_id, chat_id, sso_url, user_tag):
@@ -43,16 +46,9 @@ class JobQueue:
 
     async def get_next(self):
         async with self.lock:
-            if self.current is not None:
-                return None
             if not self.queue:
                 return None
-            self.current = self.queue.pop(0)
-            return self.current
-
-    async def finish(self):
-        async with self.lock:
-            self.current = None
+            return self.queue.pop(0)
 
     def queue_size(self):
         return len(self.queue)
@@ -104,6 +100,25 @@ def build_darktunnel_uri_with_host(base_uri: str, new_host: str) -> str:
 
 
 # ═══════════════════════════════════════════
+# مُرسل الصور
+# ═══════════════════════════════════════════
+
+def make_sender(chat_id, context):
+    async def sender(img_bytes: bytes, label: str = ""):
+        try:
+            bio = io.BytesIO(img_bytes)
+            bio.name = "shot.jpg"
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=bio,
+                caption=(label or "📸")[:1024],
+            )
+        except Exception as e:
+            log.debug(f"send_photo: {e}")
+    return sender
+
+
+# ═══════════════════════════════════════════
 # الأوامر
 # ═══════════════════════════════════════════
 
@@ -148,7 +163,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════
-# استقبال SSO — صامت (بلا رسائل)
+# استقبال SSO
 # ═══════════════════════════════════════════
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,93 +183,89 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     num = await queue.add(user.id, update.effective_chat.id, sso_url, user_tag)
 
-    # ✅ رسالة وحدة فقط
     await update.message.reply_text(
-        f"📥 تم استلام الرابط رقم {num} وسيبدأ الآن.\n"
-        f"يمكنك إرسال رابط آخر وسيضاف إلى الطابور تلقائياً."
+        f"📥 تم استلام الرابط رقم {num}.\n"
+        f"⚡ سيبدأ فور توفر خانة — أرسل روابط أخرى بحرية."
     )
 
     asyncio.create_task(process_queue(update.effective_chat.id, user.id, context))
 
 
 # ═══════════════════════════════════════════
-# معالجة الطابور — صامت
+# معالجة المهمة — متوازية + تصوير مستمر
 # ═══════════════════════════════════════════
 
 async def process_queue(chat_id, user_id, context):
-    async with asyncio.Lock():
-        item = await queue.get_next()
-        if not item:
-            return
+    item = await queue.get_next()
+    if not item:
+        return
 
-        job = item
+    job = item
+    sender = make_sender(chat_id, context)
+
+    async with _sem:  # ✅ 2 مهام متزامنة
+        browser = None
         try:
             browser = StealthBrowser()
             ctx = await browser.start()
 
-            try:
-                result = await run_sso_flow(
-                    ctx,
-                    job["sso_url"],
-                    image=config.DEFAULT_IMAGE,
-                    sender=None,  # صامت
-                    user_tag=job["user_tag"],
-                )
+            result = await run_sso_flow(
+                ctx,
+                job["sso_url"],
+                image=config.DEFAULT_IMAGE,
+                sender=sender,            # ✅ يمرّر للـ CloudConsole
+                user_tag=job["user_tag"],
+            )
 
-                domain = result["domain"]
-                final_url = result["final_url"]
+            domain = result["domain"]
+            final_url = result["final_url"]
 
-                # ✅ رسالة واحدة في الأخير
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"✅ **𝙃𝙚𝙧𝙚 𝙮𝙤𝙪 𝙜𝙤 𝙗𝙧𝙤**\n\n"
-                        f"🌐 **Domain:**\n`{domain}`\n\n"
-                        f"🔗 **URL:**\n`{final_url}`"
-                    ),
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ **𝙃𝙚𝙧𝙚 𝙮𝙤𝙪 𝙜𝙤 𝙗𝙧𝙤**\n\n"
+                    f"🌐 **Domain:**\n`{domain}`\n\n"
+                    f"🔗 **URL:**\n`{final_url}`"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
-                # ✅ 3 ملفات darktunnel
-                for dark in DARK_FILES:
-                    try:
-                        new_uri = build_darktunnel_uri_with_host(dark["uri"], domain)
-
-                        safe_domain = "".join(
-                            c for c in domain.lower()
-                            if c.isalnum() or c in ".-_"
-                        )[:40]
-
-                        filename = f"{dark['name']} - {safe_domain}.dark"
-
-                        bio = io.BytesIO(new_uri.encode("utf-8"))
-                        bio.name = filename
-
-                        await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=bio,
-                            filename=filename,
-                            caption=f"✅ {dark['name']}\n`{domain}`",
-                        )
-                    except Exception as e:
-                        log.warning(f"⚠️ dark {dark['name']}: {e}")
-
-            finally:
+            for dark in DARK_FILES:
                 try:
-                    await browser.close()
-                except Exception:
-                    pass
+                    new_uri = build_darktunnel_uri_with_host(dark["uri"], domain)
+                    safe_domain = "".join(
+                        c for c in domain.lower() if c.isalnum() or c in ".-_"
+                    )[:40]
+                    filename = f"{dark['name']} - {safe_domain}.dark"
+
+                    bio = io.BytesIO(new_uri.encode("utf-8"))
+                    bio.name = filename
+
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=bio,
+                        filename=filename,
+                        caption=f"✅ {dark['name']}\n`{domain}`",
+                    )
+                except Exception as e:
+                    log.warning(f"⚠️ dark {dark['name']}: {e}")
 
         except Exception as e:
             log.exception("فشل تنفيذ المهمة")
             try:
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ فشل\n\n{str(e)[:400]}")
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"❌ فشل\n\n{str(e)[:400]}"
+                )
             except Exception:
                 pass
 
         finally:
-            await queue.finish()
-
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            # 🚀 شغّل التالي مباشرةً (بدون انتظار انتهاء sem)
             if queue.queue_size() > 0:
                 asyncio.create_task(process_queue(chat_id, user_id, context))
 
